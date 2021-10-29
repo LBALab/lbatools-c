@@ -12,7 +12,7 @@ extern int32_t	decompress(int16_t type, char *output, char *input, int32_t lengt
 extern int32_t	decompress_lz(int16_t type, char *output, char *input, int32_t length);
 
 
-#define decompress_store	compress_storef
+#define decompress_store	compress_store
 
 
 #endif	/*LBATOOLS_COMPRESS_H*/

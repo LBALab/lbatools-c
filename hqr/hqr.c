@@ -5,15 +5,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "compress.h"
+#include <lbatools/compress.h>
+#include <lbatools/hqr.h>
 
 
+#define ENTRY_CHILD	-2	/* Child entry. */
+#define ENTRY_UNUSED	-1	/* Unused entry. */
 #define ENTRY_NULL	0	/* NULL entry, to be save as an offset of 0x00000000. */
 #define ENTRY_NORMAL	1	/* Normal entry. */
 #define ENTRY_POINTER	2	/* Pointer to another entry (use .parent). */
 #define ENTRY_EOF	3	/* End of file (entry points to the end of file). */
 
-#define COMPRESS_NONE	0
+#define COMPRESS_STORE	0
 #define COMPRESS_LZSS	1
 #define COMPRESS_LZMIT	2
 
@@ -24,51 +27,20 @@
 #define NUM_OFFSETS	65536
 
 
-typedef struct
-{
-    int32_t	dec_size, comp_size;
-    int16_t	comp_type, entry_type;
-    int32_t	offset;
-    int32_t	tbl_next_off, size_next_off;
-    uint8_t	*desc, *data;
-} hqr_child_t;
-
-
-typedef struct
-{
-    int32_t	parent;			/* Parent for pointer. */
-    int32_t	dec_size, comp_size;
-    int16_t	comp_type, entry_type;
-    int32_t	offset;
-    int32_t	tbl_next_off, size_next_off;
-    uint8_t	*desc, *data;
-
-    hqr_child_t	*children;
-    int32_t	children_no;
-} hqr_entry_t;
-
-
-typedef struct
-{
-    int32_t	offset, entry;
-} hqr_offset_t;
-
-
 static hqr_entry_t	*hqr_entries;
-static hqr_offset_t	*hqr_offsets;
+static hqr_offset_t	*hqr_offsets = NULL;
 static int32_t		hqr_entries_no, hqr_offsets_no;
-static int32_t		first_entry, last_entry, next_entry, next_offset;
-static int32_t		first_offset, last_offset;
+// static int32_t		next_entry, next_offset;
 static FILE *		hqr_file = NULL;
 static char *		comp_types[3] = { "None", "LZSS", "LZMIT" };
 static char *		entry_types[8] = { "Null", "Normal", "Pointer", "EOF" };
 
 
 static void
-hqr_child_init(hqr_child_t *hc)
+hqr_child_init(hqr_common_t *hc)
 {
     hc->entry_type = ENTRY_NULL;
-    hc->comp_type = COMPRESS_NONE;
+    hc->comp_type = COMPRESS_STORE;
     hc->dec_size = hc->comp_size = 0;
     hc->desc = hc->data = NULL;
     hc->tbl_next_off = hc->size_next_off = 0x00000000;
@@ -77,30 +49,30 @@ hqr_child_init(hqr_child_t *hc)
 
 
 static void
-hqr_child_add(int32_t i, hqr_child_t hc)
+hqr_child_add(hqr_t *hqr, int32_t i, hqr_common_t hc)
 {
-    if (hqr_entries_no >= NUM_CHILDREN) {
+    if (hqr->entries_no >= NUM_CHILDREN) {
 	printf("ASSERT: Children exhausted for entry %i\n", i);
 	return;
     }
 
-    if (hqr_entries[i].children_no == 0)
-	hqr_entries[i].children = (hqr_child_t *) malloc((hqr_entries[i].children_no + 1) * sizeof(hqr_child_t));
+    if (hqr->entries[i].children_no == 0)
+	hqr->entries[i].children = (hqr_common_t *) malloc((hqr->entries[i].children_no + 1) * sizeof(hqr_common_t));
     else
-	hqr_entries[i].children = (hqr_child_t *) realloc(hqr_entries[i].children,
-							  (hqr_entries[i].children_no + 1) * sizeof(hqr_child_t));
+	hqr->entries[i].children = (hqr_common_t *) realloc(hqr->entries[i].children,
+							    (hqr->entries[i].children_no + 1) * sizeof(hqr_common_t));
 
-    hqr_entries[i].children[hqr_entries[i].children_no] = hc;
-    hqr_entries[i].children_no++;
+    hqr->entries[i].children[hqr->entries[i].children_no] = hc;
+    hqr->entries[i].children_no++;
 }
 
 
 static int32_t
-hqr_next_child(int32_t i, hqr_child_t hc)
+hqr_next_child(hqr_t *hqr, int32_t i, hqr_common_t hc)
 {
-    hqr_child_add(i, hc);
+    hqr_child_add(hqr, i, hc);
 
-    return (hqr_entries[i].children_no - 1);
+    return (hqr->entries[i].children_no - 1);
 }
 
 
@@ -108,7 +80,7 @@ static void
 hqr_entry_init(hqr_entry_t *he)
 {
     he->entry_type = ENTRY_NULL;
-    he->comp_type = COMPRESS_NONE;
+    he->comp_type = COMPRESS_STORE;
     he->dec_size = he->comp_size = 0;
     he->parent = UNUSED;
     he->desc = he->data = NULL;
@@ -121,29 +93,29 @@ hqr_entry_init(hqr_entry_t *he)
 
 
 static void
-hqr_entry_add(hqr_entry_t he)
+hqr_entry_add(hqr_t *hqr, hqr_entry_t he)
 {
-    if (hqr_entries_no >= NUM_ENTRIES) {
+    if (hqr->entries_no >= NUM_ENTRIES) {
 	printf("ASSERT: Entries exhausted\n");
 	return;
     }
 
-    if (hqr_entries_no == 0)
-	hqr_entries = (hqr_entry_t *) malloc((hqr_entries_no + 1) * sizeof(hqr_entry_t));
+    if (hqr->entries_no == 0)
+	hqr->entries = (hqr_entry_t *) malloc((hqr->entries_no + 1) * sizeof(hqr_entry_t));
     else
-	hqr_entries = (hqr_entry_t *) realloc(hqr_entries, (hqr_entries_no + 1) * sizeof(hqr_entry_t));
+	hqr->entries = (hqr_entry_t *) realloc(hqr->entries, (hqr->entries_no + 1) * sizeof(hqr_entry_t));
 
-    hqr_entries[hqr_entries_no] = he;
-    hqr_entries_no++;
+    hqr->entries[hqr->entries_no] = he;
+    hqr->entries_no++;
 }
 
 
 static int32_t
-hqr_next_entry(hqr_entry_t he)
+hqr_next_entry(hqr_t *hqr, hqr_entry_t he)
 {
-    hqr_entry_add(he);
+    hqr_entry_add(hqr, he);
 
-    return (hqr_entries_no - 1);
+    return (hqr->entries_no - 1);
 }
 
 
@@ -198,32 +170,41 @@ hqr_find_same_offset(int32_t offset)
 }
 
 
-static void
+void
+hqr_offsets_clear(void)
+{
+    if (hqr_offsets != NULL) {
+	free(hqr_offsets);
+	hqr_offsets = NULL;
+    }
+
+    hqr_offsets_no = 0;
+
+}
+
+
+hqr_t *
 hqr_init(void)
 {
-    hqr_entries_no = hqr_offsets_no = 0;
+    hqr_t *hqr = (hqr_t *) malloc(sizeof(hqr_t));
 
-    hqr_entries = NULL;
-    hqr_offsets = NULL;
+    memset(hqr, 0x00, sizeof(hqr_t));
 
-    first_entry = last_entry = UNUSED;
-    first_offset = last_offset = UNUSED;
-    next_entry = next_offset = 0;
-    hqr_file = NULL;
+    return hqr;
 }
 
 
 #if 0
 static void
-hqr_replace_parent(int32_t old, int32_t new)
+hqr_replace_parent(hqr_t *hqr, int32_t old, int32_t new)
 {
     int32_t i;
 
-    for (i = 0; i < hqr_entries_no; i++) {
-	if (hqr_entries[i].parent == old)
-		hqr_entries[i].parent = new;
-	else if (hqr_entries[i].parent == new)
-		hqr_entries[i].parent = old;
+    for (i = 0; i < hqr->entries_no; i++) {
+	if (hqr->entries[i].parent == old)
+		hqr->entries[i].parent = new;
+	else if (hqr->entries[i].parent == new)
+		hqr->entries[i].parent = old;
     }
 }
 #endif
@@ -247,13 +228,13 @@ hqr_find_next_offset(int32_t offset)
 
 #if 0
 static int32_t
-hqr_find_parent(int32_t offset)
+hqr_find_parent(hqr_t *hqr, int32_t offset)
 {
     int32_t i, ret = UNUSED;
 
-    for (i = 0; i < hqr_entries_no; i++) {
-	if (hqr_entries[i].offset == offset) {
-		ret = hqr_entries[i].offset;
+    for (i = 0; i < hqr->entries_no; i++) {
+	if (hqr->entries[i].offset == offset) {
+		ret = hqr->entries[i].offset;
 		break;
 	}
     }
@@ -264,7 +245,20 @@ hqr_find_parent(int32_t offset)
 
 
 static void
-hqr_load(void)
+hqr_file_close(hqr_t *hqr)
+{
+    if (hqr == NULL)
+	return 0;
+
+    if (hqr->file != NULL) {
+	fclose(hqr->file);
+	hqr->file = NULL;
+    }
+}
+
+
+static int32_t
+hqr_load_internal(hqr_t *hqr, char *path)
 {
     int32_t i, j;
     int32_t file_len, offset;
@@ -272,21 +266,25 @@ hqr_load(void)
     int32_t prev_o, next_o;
     hqr_entry_t he;
     hqr_offset_t ho;
-    hqr_child_t hc;
+    hqr_common_t hc;
 
-    if (hqr_file == NULL)
-	return;
+    if (hqr->file != NULL)
+	hqr_file_close(hqr);
 
-    fseek(hqr_file, 0, SEEK_END);
-    file_len = ftell(hqr_file);
+    hqr->file = fopen(path, "rb");
+    if (hqr->file == NULL)
+	return 0;
+
+    fseek(hqr->file, 0, SEEK_END);
+    file_len = ftell(hqr->file);
     if (file_len < 4)
-	return;
+	return 0;
 
     /* Pass 1: Load the main entries. */
     i = 0;
     while (1) {
-	fseek(hqr_file, i << 2, SEEK_SET);
-	fread(&offset, 1, 4, hqr_file);
+	fseek(hqr->file, i << 2, SEEK_SET);
+	fread(&offset, 1, 4, hqr->file);
 	prev_o = hqr_find_same_offset(offset);
 	if (offset != 0x00000000) {
 		/* Not a NULL entry. */
@@ -298,11 +296,11 @@ hqr_load(void)
 			next_o = hqr_next_offset(ho);
 			if (next_o == UNUSED) {
 				printf("ASSERT: Failed to allocate next offset\n");
-				return;
+				return 0;
 			}
 
 			hqr_entry_init(&he);
-			fseek(hqr_file, offset, SEEK_SET);
+			fseek(hqr->file, offset, SEEK_SET);
 			if (offset == file_len) {
 				/* EOF entry. */
 				he.entry_type = ENTRY_EOF;
@@ -312,15 +310,15 @@ hqr_load(void)
 				/* Normal entry. */
 				he.entry_type = ENTRY_NORMAL;
 				he.offset = offset;
-				fread(&he.dec_size, 1, 4, hqr_file);
-				fread(&he.comp_size, 1, 4, hqr_file);
-				fread(&he.comp_type, 1, 2, hqr_file);
+				fread(&he.dec_size, 1, 4, hqr->file);
+				fread(&he.comp_size, 1, 4, hqr->file);
+				fread(&he.comp_type, 1, 2, hqr->file);
 				if ((he.comp_type < 0) || (he.comp_type > 2))
 					printf("ASSERT: Invalid compression type %i for entry %i\n", hqr_entries[next_e].comp_type, next_e);
 				else if ((he.comp_type == 0) && (he.dec_size != he.comp_size))
 					printf("ASSERT: Size mismatch in a non-compressed entry\n");
 				he.data = (uint8_t *) malloc(he.comp_size);
-				fread(he.data, 1, he.comp_size, hqr_file);
+				fread(he.data, 1, he.comp_size, hqr->file);
 				printf("%05i (%08X): NORMAL: %08X, %08X, %5s\n", i, offset, he.dec_size, he.comp_size,
 				       comp_types[he.comp_type]);
 			}
@@ -337,10 +335,10 @@ hqr_load(void)
 		printf("%05i (%08X): NULL\n", i, offset);
 	}
 
-	next_e = hqr_next_entry(he);
+	next_e = hqr_next_entry(hqr, he);
 	if (next_e == UNUSED) {
 		printf("ASSERT: Failed to allocate next entry\n");
-		return;
+		return 0;
 	}
 
 	i++;
@@ -352,44 +350,43 @@ hqr_load(void)
     }
 
     /* Pass 2: Load the children. */
-    for (i = 0; i < hqr_entries_no; i++) {
-	if (hqr_entries[i].entry_type == ENTRY_NORMAL) {
-		hqr_entries[i].tbl_next_off = hqr_find_next_offset(hqr_entries[i].offset);
-		if (hqr_entries[i].tbl_next_off == UNUSED) {
-			printf("ASSERT: hqr_entries[i].tbl_next_off = UNUSED\n");
+    for (i = 0; i < hqr->entries_no; i++) {
+	if (hqr->entries[i].entry_type == ENTRY_NORMAL) {
+		hqr->entries[i].tbl_next_off = hqr_find_next_offset(hqr->entries[i].offset);
+		if (hqr->entries[i].tbl_next_off == UNUSED) {
+			printf("ASSERT: hqr->entries[i].tbl_next_off = UNUSED\n");
 			return;
 		}
-		hqr_entries[i].size_next_off = hqr_entries[i].offset + hqr_entries[i].comp_size + 10;
+		hqr->entries[i].size_next_off = hqr->entries[i].offset + hqr->entries[i].comp_size + 10;
 
-		if (hqr_entries[i].tbl_next_off != hqr_entries[i].size_next_off) {
+		if (hqr->entries[i].tbl_next_off != hqr->entries[i].size_next_off) {
 			j = 0;
-			he = hqr_entries[i];
+			he = hqr->entries[i];
 			hqr_child_init(&hc);
 			while (1) {
-				hc.entry_type = he.entry_type;
 				if (j == 0)		/* Use parent size_next_off. */
 					hc.offset = he.size_next_off;
 				else			/* Use previous child size_next_off. */
 					hc.offset = hc.size_next_off;
 				fseek(hqr_file, hc.offset, SEEK_SET);
 				hc.tbl_next_off = he.tbl_next_off;
-				fread(&hc.dec_size, 1, 4, hqr_file);
-				fread(&hc.comp_size, 1, 4, hqr_file);
+				fread(&hc.dec_size, 1, 4, hqr->file);
+				fread(&hc.comp_size, 1, 4, hqr->file);
 				hc.size_next_off = hc.offset + hc.comp_size + 10;
-				fread(&hc.comp_type, 1, 2, hqr_file);
+				fread(&hc.comp_type, 1, 2, hqr->file);
 				if ((hc.comp_type < 0) || (hc.comp_type > 2))
 					printf("ASSERT: Invalid compression type %i for entry %i.%i\n", hc.comp_type, i, j);
 				else if ((hc.comp_type == 0) && (hc.dec_size != hc.comp_size))
 					printf("ASSERT: Size mismatch in a non-compressed entry\n");
 				hc.data = (uint8_t *) malloc(hc.comp_size);
-				fread(hc.data, 1, hc.comp_size, hqr_file);
+				fread(hc.data, 1, hc.comp_size, hqr->file);
 				printf("%05i.%05i (%08X): NORMAL: %08X, %08X, %s\n", i, j, hc.offset, hc.dec_size, hc.comp_size,
 				       comp_types[hc.comp_type]);
 
-				next_c = hqr_next_child(i, hc);
+				next_c = hqr_next_child(hqr, i, hc);
 				if (next_c == UNUSED) {
 					printf("ASSERT: Failed to allocate next child for entry %i\n", i);
-					return;
+					return 0;
 				}
 
 				j++;
@@ -401,206 +398,356 @@ hqr_load(void)
 		}
 	}
     }
+
+    return 1;
 }
 
 
-/* Constraints:
-	- [I] EOF entries may not be deleted;
-	- [I] When deleting normal entries, find the first pointer, if any, and convert it into a normal entry;
-	- Any entry with corresponding hidden entries can only be deleted when all hidden entries are gone;
-	- Pointers to entries with hidden entries need to have their own hidden entries updated to match those
-	  of the entry it points to;
-	- [I] Any entry with a parent above ours must have its parent number updated.
-
-	Perhaps having the hidden entries on a child linked list belonging to the parent entry would be better.
-	Then, deleting a parent that has any children would simply cause its child to take its place*, and any
-	pointer update would be simpler as well.
-
-	* Any child would take over the parent's entry and have its own entry deleted instead. */
-#if 0
-static void
-hqr_entry_delete(int32_t entry)
+/* Wrapper to make sure we always clean up hqr_offets after loading a file. */
+int32_t
+hqr_load(hqr_t *hqr, char *path)
 {
-    int32_t i, p;
-    int32_t new;
+    int32_t ret;
+
+    if (hqr == NULL)
+	return 0;
+
+    ret = hqr_load_internal(hqr, path);
+
+    if (hqr_offsets != NULL) {
+	free(hqr_offsets);
+	hqr_offsets = NULL;
+    }
+
+    hqr_file_close(hqr);
+
+    return ret;
+}
+
+
+int32_t
+hqr_entry_delete(hqr_t *hqr int32_t entry, int32_t delete_children)
+{
+    int32_t i, new, delete, list_entry_del = 0, first_ptr = UNUSED;
     hqr_entry_t he;
 
+    if (hqr == NULL)
+	return 0;
+
     if (entry == UNUSED)
-	return;
+	return 0;
 
-    if ((hqr_entries[entry].entry_type & ENTRY_MASK) == ENTRY_EOF)
-	return;
+    if (hqr->entries[entry].entry_type == ENTRY_EOF)
+	return 0;
 
-    i = first_entry;
-    p = 0;
-    while (i != UNUSED) {
-	if (hqr_entries[i].parent > entry)
-		hqr_entries[i].parent--;
-	else if ((hqr_entries[i].parent == entry) && (p == 0)) {
-		p++;
-		new = i;
-		he = hqr_entries[i];
-		hqr_entries[i] = hqr_entries[entry];
-		hqr_entries[i].prev = he.prev;
-		hqr_entries[i].next = he.next;
-	} else if ((hqr_entries[i].parent == entry) && (p > 0)) {
-		p++;
-		hqr_entries[i].parent = new;
+    delete = (hqr->entries[entry].children_no == 0) || delete_children;
+
+    /* Pass 1: Find all entries that point to us. */
+    if (hqr->entries[entry].entry_type == ENTRY_NORMAL) {
+	/* There are no pointers to pointers or pointers to NULL entries. */
+	for (i = 0; i < hqr->entries_no; i++) {
+		if (hqr->entries[i].parent == entry) {
+			first_ptr = i;
+			break;
+   		}
 	}
-	i = hqr_entries[i].next;
     }
 
-    if (hqr_entries[entry].prev != UNUSED)
-	hqr_entries[hqr_entries[entry].prev].next = hqr_entries[entry].next;
-
-    if (hqr_entries[entry].next != UNUSED)
-	hqr_entries[hqr_entries[entry].next].prev = hqr_entries[entry].prev;
-
-    if (p != 0) {
-	if (hqr_entries[entry].desc != NULL) {
-		free(hqr_entries[entry].desc);
-		hqr_entries[entry].desc = NULL;
+    if (first_ptr != UNUSED) {
+	/* If anything points to us, then do not delete the data field or children, but pass them to the
+	   pointer. */
+	for (i = first_ptr + 1; i < hqr->entries_no; i++) {
+		if (hqr->entries[i].parent == entry)
+			hqr->entries[i].parent = first_ptr;
 	}
 
-	if (hqr_entries[entry].data != NULL) {
-		free(hqr_entries[entry].data);
-		hqr_entries[entry].data = NULL;
+	hqr->entries[first_ptr].type = ENTRY_NORMAL;
+	hqr->entries[first_ptr].dec_size = hqr->entries[entry].dec_size;
+	hqr->entries[first_ptr].comp_size = hqr->entries[entry].comp_size;
+	hqr->entries[first_ptr].data = hqr->entries[entry].data;
+	hqr->entries[first_ptr].children_no = hqr->entries[entry].children_no;
+	hqr->entries[first_ptr].children = hqr->entries[entry].children;
+
+	/* Clean up our own entry. */
+	hqr->entries[entry].data = NULL;
+	hqr->entries[entry].children_no = NULL;
+	hqr->entries[entry].chilren = NULL;
+	/* Force no deletion of children if we're passing ourselves to our first pointer. */
+	delete = 0;
+    }
+
+    /* Finish removing ourselves, with the data field first. */
+    if (hqr->entries[entry].data != NULL) {
+	free(hqr->entries[entry].data);
+	hqr->entries[entry].data = NULL;
+    }
+
+    /* Next, the description field. */
+    if (hqr->entries[entry].desc != NULL) {
+	free(hqr->entries[entry].desc);
+	hqr->entries[entry].desc = NULL;
+    }
+
+    if ((hqr->entries[entry].children_no == 0) || delete) {
+	/* Update all parents - do this here so that if we pass ourselves to our
+	   first child, we do not update parents as our entry is still going to
+	   exist. */
+	for (i = 0; i < hqr->entries_no; i++) {
+		if (hqr->entries[i].parent > entry)
+			hqr->entries[i].parent--;
 	}
+	list_entry_del = 1;
+    }
+
+    if (hqr->entries[entry].children_no != 0) {
+	/* And now the children. */
+	if (delete) {
+		/* Delete all of them. */
+		for (i = 0; i < hqr->entries[entry].children_no; i++) {
+			/* Data field. */
+			if (hqr->entries[entry].children[i].data != NULL) {
+				free(hqr->entries[entry].children[i].data);
+				hqr->entries[entry].children[i].data = NULL;
+			}
+
+			/* Next, the description field. */
+			if (hqr->entries[entry].children[i].desc != NULL) {
+				free(hqr->entries[entry].children[i].desc);
+				hqr->entries[entry].children[i].desc = NULL;
+			}
+		}
+
+		hqr->entries[entry].children_no = 0;
+		free(hqr->entries[entry].children);
+		hqr->entries[entry].children = NULL;
+	} else {
+		/* Pass ourselves to our first child. */
+		hqr->entries[entry].dec_size = hqr->entries[entry].children[0].dec_size;
+		hqr->entries[entry].comp_size = hqr->entries[entry].children[0].comp_size;
+		hqr->entries[entry].comp_type = hqr->entries[entry].children[0].comp_type;
+		hqr->entries[entry].desc = hqr->entries[entry].children[0].desc;
+		hqr->entries[entry].data = hqr->entries[entry].children[0].data;
+
+		/* Remove the first child from the list. */
+		for (i = 1; i < hqr->entries[entry].children_no; i++)
+			hqr->entries[entry].children[i - 1] = hqr->entries[entry].children[i];
+		hqr->entries[entry].children_no--;
+		memset(hqr->entries[entry].children[hqr->entries[entry].children_no], 0x00, sizeof(hqr_common_t));
+		if (hqr->entries[entry].children_no == 0) {
+			free(hqr->entries[entry].children);
+			hqr->entries[entry].children = NULL;
+		} else
+			hqr->entries[entry].children = (hqr_common_t *) realloc(hqr->entries[entry].children,
+									hqr->entries[entry].children_no * sizeof(hqr_common_t));
+	}
+    }
+
+    if (list_entry_del) {
+	/* Remove ourselves from the list. */
+	for (i = entry + 1; i < hqr_entries_no; i++)
+		hqr->entries[i - 1] = hqr->entries[i];
+	hqr->entries_no--;
+	memset(hqr->entries[hqr->entries_no], 0x00, sizeof(hqr_entry_t));
+	if (hqr->entries_no == 0) {
+		free(hqr->entries);
+		hqr->entries = NULL;
+	} else
+		hqr->entries = (hqr_entry_t *) realloc(hqr->entries, hqr->entries_no * sizeof(hqr_entry_t));
+    }
+
+    return 1;
+}
+
+
+hqr_common_t
+hqr_entry_new(int32_t entry_type, int32_t parent, int32_t dec_size, int16_t comp_type, char *buf)
+{
+    hqr_common_t hc;
+
+    memset(&hc, 0x00, sizeof(hqr_common_t));
+
+    hc.entry_type = entry_type;
+    hc.parent = parent;
+    hc.dec_size = dec_size;
+
+    /* Force Store if someone tries an invalid type. */
+    if ((comp_type < COMPRESS_STORE) || (comp_type < COMPRESS_LZMIT))
+	comp_type = 0;
+    hc.comp_type = comp_type;
+
+    hc.data = (char *) malloc(val << 1);
+    hc.comp_size = compress(comp_type, hc.data, buf, val);
+
+    return hc;
+}
+
+
+/* Add a HQR entry:
+	- After a child:
+		- Before a child - always add as a child;
+		- Before a normal entry - add as a normal entry or child depending on the parameter;
+		- Before anything else - always add as a normal entry;
+	- After a normal entry:
+		- Before a child - add as a normal entry or child depending on the parameter;
+		- Before another normal entry - add as a normal entry or child depending on the parameter;
+		- Before anything else - always add as a normal entry;
+	- After anything else:
+		- Before a child - this is an invalid situation that can not exist;
+		- Before another normal entry - always add as a normal entry;
+		- Before anything else - always add as a normal entry. */
+int32_t
+hqr_entry_insert(hqr_t *hqr, int32_t entry, int32_t child, hqr_common_t hc, int32_t add_as_child, char *buf)
+{
+    int32_t prev_entry_type = ENTRY_UNUSED, next_entry_type = ENTRY_UNUSED;
+    int32_t i;
+
+    /* Uninitialized High Quality Resource, do nothing. */
+    if (hqr_entries == NULL)
+	return 0;
+
+    /* Attempting to insert an invalid or EOF type, do nothing. */
+    if ((hc.entry_type < ENTRY_NULL) && (hc.entry_type >= ENTRY_EOF))
+	return 0;
+
+    /* Return without doing anything if the entry number to insert at is invalid. */
+    if ((entry < 0) || (entry > hqr->entries_no))
+	return 0;
+
+    /* Return without doing anything if we're trying to add a child to a non-existent entry. */
+    if ((child != 0) && (entry == hqr->entries_no))
+	return 0;
+
+    /* Return without doing anything if the child number to insert at is invalid. */
+    if ((child < 0) || ((entry < hqr->entries_no) && (child > hqr->entries[entry].children_no)))
+	return 0;
+
+    if ((child == 0) && (entry > 0))
+	prev_entry_type = hqr_entries[entry - 1].entry_type;
+    else if (child > 0)
+	prev_entry_type = ENTRY_CHILD;
+
+    if ((child == hqr->entries[entry].children_no) && (entry < (hqr->entries_no - 1)))
+	next_entry_type = hqr->entries[entry].entry_type;
+    else if (child < hqr->entries[entry].children_no)
+	next_entry_type = ENTRY_CHILD;
+
+    /* Uninitialized High Quality Resource, do nothing. */
+    if ((prev_entry_type == ENTRY_UNUSED) && (next_entry_type == ENTRY_UNUSED))
+	return 0;
+
+    /* Attempting to insert an entry after the EOF entry, do nothing. */
+    if (prev_entry_type == ENTRY_EOF)
+	return 0;
+
+    /* Impossible combination, get out. */
+    if (prev_entry_type != ENTRY_NORMAL) && (next_entry_type == ENTRY_CHILD))
+	return 0;
+
+    /* If the next entry is not normal, always insert it as a normal entry. */
+    if ((next_entry_type != ENTRY_NORMAL) && (next_entry_type != ENTRY_EOF))
+	add_as_child = 0;
+
+    /* If we're after an entry that's not normal, and before an entry that's
+       either normal or EOF, always insert it as a normal entry. */
+    if ((prev_entry_type != ENTRY_NORMAL) && ((next_entry_type == ENTRY_NORMAL) || (next_entry_type == ENTRY_EOF)))
+	add_as_child = 0;
+
+    /* If we're between children, always insert it as a child. */
+    if ((prev_entry_type == ENTRY_CHILD) && (next_entry_type == ENTRY_CHILD))
+	add_as_child = 1;
+
+    if (add_as_child) {
+	/* Attempting to insert a pointer or null entry as a child, do nothing. */
+	if (hc.entry_type != ENTRY_NORMAL)
+		return 0;
+    }
+
+    if (add_as_child) {
+	if (hqr->entries[entry].children_no == 0)
+		hqr->entries[entry].children = (hqr_common_t *) malloc((hqr->entries[entry].children_no + 1) *
+								sizeof(hqr_common_t));
+	else
+		hqr->entries[entry].children = (hqr_common_t *) realloc(hqr->entries[entry].children,
+								(hqr->entries[entry].children_no + 1) * sizeof(hqr_common_t));
+
+	if (child < hqr->entries[entry].children_no) {
+		for (i = hqr->entries[entry].children_no; i > child; i--)
+			hqr->entries[entry].children[i] = hqr->entries[entry].children[i - 1];
+	}
+
+	hqr->entries[entry].children[child] = hc;
+	hqr->entries[entry].children_no++;
     } else {
-	hqr_entries[entry].desc = NULL;
-	hqr_entries[entry].data = NULL;
+	if (hqr->entries_no == 0)
+		hqr->entries = (hqr_entry_t *) malloc((hqr->entries_no + 1) * sizeof(hqr_entry_t));
+	else
+		hqr->entries = (hqr_entry_t *) realloc(hqr->entries, (hqr->entries_no + 1) * sizeof(hqr_entry_t));
+
+	/* Update parents. */
+	for (i = 0; i < hqr->entries_no; i++) {
+		 if (hqr->entries[i].parent >= entry)
+			hqr->entries[i].parent++;
+	}
+
+	if (entry < hqr->entries_no) {
+		for (i = hqr->entries_no; i > entry; i--)
+			hqr->entries[i] = hqr->entries[i - 1];
+	}
+
+	hqr->entries[entry] = (hqr_entry_t *) hc;
+	hqr_->ntries_no++;
     }
 
-    hqr_entries[entry].prev = hqr_entries[entry].next = UNUSED;
-
-    hqr_list_sort();
-}
-#endif
-
-
-static void
-hqr_file_close(void)
-{
-    if (hqr_file != NULL) {
-	fclose(hqr_file);
-	hqr_file = NULL;
-    }
-}
-
-
-static void
-hqr_file_open_r(char *path)
-{
-    if (hqr_file != NULL)
-	hqr_file_close();
-
-    hqr_file = fopen(path, "rb");
+    return 1;
 }
 
 
 #if 0
 static void
-hqr_file_open_w(char *path)
+hqr_file_open_w(hqr_t *hqr, char *path)
 {
-    if (hqr_file != NULL)
-	hqr_file_close();
+    if (hqr->file != NULL)
+	hqr->file_close();
 
-    hqr_file = fopen(path, "wb");
+    hqr->file = fopen(path, "wb");
 }
 #endif
 
 
-static void
-hqr_free(void)
+void
+hqr_free(hqr_t *hqr)
 {
     int32_t i;
 
-    for (i = 0; i < hqr_entries_no; i++) {
-	if (hqr_entries[i].desc != NULL) {
-		free(hqr_entries[i].desc);
-		hqr_entries[i].desc = NULL;
+    for (i = 0; i < hqr->entries_no; i++) {
+	if (hqr->entries[i].desc != NULL) {
+		free(hqr->entries[i].desc);
+		hqr->entries[i].desc = NULL;
 	}
 
-	if (hqr_entries[i].data != NULL) {
-		free(hqr_entries[i].data);
-		hqr_entries[i].data = NULL;
+	if (hqr->entries[i].data != NULL) {
+		free(hqr->entries[i].data);
+		hqr->entries[i].data = NULL;
 	}
 
-	if (hqr_entries[i].children != NULL) {
-		free(hqr_entries[i].children);
-		hqr_entries[i].children = NULL;
+	if (hqr->entries[i].children != NULL) {
+		free(hqr->entries[i].children);
+		hqr->entries[i].children = NULL;
 	}
     }
 
-    free(hqr_entries);
-    hqr_entries = NULL;
+    free(hqr->entries);
+    hqr->entries = NULL;
 
-    hqr_entries_no = 0;
-
-    free(hqr_offsets);
-    hqr_offsets = NULL;
-
-    hqr_offsets_no = 0;
+    hqr->entries_no = 0;
 }
 
 
-static void
-hqr_close(void)
+void
+hqr_close(hqr_t *hqr)
 {
-    hqr_free();
-    hqr_file_close();
-}
+    hqr_free(hqr);
+    hqr_file_close(hqr);
 
-
-int
-main(int argc, char *argv[])
-{
-    int32_t i, j;
-    hqr_entry_t he;
-
-    if (argc != 2) {
-	printf("ASSERT: Invalid argc: %i\n", argc);
-	return 1;
-    }
-
-    hqr_init();
-
-    hqr_file_open_r(argv[1]);
-    if (hqr_file == NULL) {
-	printf("ASSERT: Error opening file: %s\n", argv[1]);
-	return 2;
-    }
-
-    hqr_load();
-
-    if (hqr_entries_no == 0) {
-	printf("ASSERT: File %s has no entries\n", argv[1]);
-	hqr_close();
-	return 3;
-    }
-
-    printf("%s\n", argv[1]);
-    for (i = 0; i < hqr_entries_no; i++) {
-	if (hqr_entries[i].entry_type == ENTRY_NORMAL) {
-		printf("    +---- %05i: %7s (%5s)\n", i, entry_types[hqr_entries[i].entry_type],
-		       comp_types[hqr_entries[i].comp_type]);
-		he = hqr_entries[i];
-	} else if (hqr_entries[i].entry_type == ENTRY_POINTER) {
-		printf("    +---- %05i: %7s (%05i)\n", i, entry_types[hqr_entries[i].entry_type], hqr_entries[i].parent);
-		he = hqr_entries[hqr_entries[i].parent];
-	} else {
-		printf("    +---- %05i: %7s\n", i, entry_types[hqr_entries[i].entry_type]);
-		he = hqr_entries[i];
-	}
-
-	if (he.children_no > 0) {
-		for (j = 0; j < he.children_no; j++)
-			printf("    |       +---- %05i.%05i: %7s (%5s)\n", i, j, entry_types[he.children[j].entry_type],
-			       comp_types[he.children[j].comp_type]);
-	}
-    }
-
-    hqr_close();
-
-    return 0;
+    free(hqr);
 }

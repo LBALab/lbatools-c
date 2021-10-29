@@ -12,7 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "compress.h"
+#include <lbatools/compress.h>
 
 
 /************************** Start of LZSS.C ************************

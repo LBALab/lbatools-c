@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "compress.h"
+#include <lbatools/compress.h>
 
 
 int32_t

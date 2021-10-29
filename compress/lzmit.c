@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "compress.h"
+#include <lbatools/compress.h>
 
 
 #define INDEX_BIT_COUNT		12
