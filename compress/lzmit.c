@@ -124,7 +124,7 @@ compress_lzmit(char *output, char *input, int32_t length)
 
 		tree[src_tree + 1].children[LARGER] = tree[src_tree + 1].children[SMALLER] = UNUSED;
 
-		cur_node = (int32_t) tree[TREE_ROOT + 1].children[SMALLER];
+		cur_node = tree[TREE_ROOT + 1].children[SMALLER];
 
 		if (cur_node < 0) {
 			best_match = best_node = 0;
@@ -153,7 +153,7 @@ compress_lzmit(char *output, char *input, int32_t length)
 					}
 
 					j = (diff >= 0) ? 1 : 0;
-					cur_node = (int32_t) tree[node + 1].children[j];
+					cur_node = tree[node + 1].children[j];
 
 					if (cur_node < 0) {
 						update_parent(src_tree, node, j);
@@ -195,7 +195,7 @@ compress_lzmit(char *output, char *input, int32_t length)
 	flag_bit++;
 	if (flag_bit >= 8) {
 		flag_bit = 0;
-		output[offset_off] = val;
+		output[offset_off] = val & 0xff;
 		offset_off = out_len;
 		out_len++;
 	}

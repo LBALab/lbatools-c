@@ -21,11 +21,7 @@
  * algorithm.  As iplemented here it uses a 12 bit index into the sliding
  * window, and a 4 bit length, which is adjusted to reflect phrase lengths
  * of between 2 and 17 bytes.
- */
-#include "lzss.h"
-
-
-/*
+ *
  * Various constants used to define the compression parameters.  The
  * INDEX_BIT_COUNT tells how many bits we allocate to indices into the
  * text window.  This directly determines the WINDOW_SIZE.  The
