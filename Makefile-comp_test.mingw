@@ -1,0 +1,250 @@
+#
+# 86Box		A hypervisor and IBM PC system emulator that specializes in
+#		running old operating systems and software designed for IBM
+#		PC systems and compatibles from 1981 through fairly recent
+#		system designs based on the PCI bus.
+#
+#		This file is part of the 86Box distribution.
+#
+#		Makefile for Win32 (MinGW32) environment.
+#
+# Authors:	Miran Grca, <mgrca8@gmail.com>
+#               Fred N. van Kempen, <decwiz@yahoo.com>
+#
+
+# Defaults for several build options (possibly defined in a chained file.)
+ifndef DEBUG
+DEBUG		:= n
+endif
+ifndef AUTODEP
+AUTODEP		:= n
+endif
+ifndef X64
+X64		:= n
+endif
+ifndef ARM
+ARM := n
+endif
+ifndef ARM64
+ARM64 := n
+endif
+
+
+# Name of the executable.
+ifndef PROG
+ PROG		:= comp_test
+endif
+
+
+#########################################################################
+#		Nothing should need changing from here on..		#
+#########################################################################
+VPATH		:= $(EXPATH) cli-tools compress
+ifeq ($(X64), y)
+TOOL_PREFIX     := x86_64-w64-mingw32-
+else
+TOOL_PREFIX     := i686-w64-mingw32-
+endif
+WINDRES		:= windres
+STRIP		:= strip
+ifeq ($(ARM64), y)
+WINDRES		:= aarch64-w64-mingw32-windres
+STRIP		:= aarch64-w64-mingw32-strip
+endif
+ifeq ($(ARM), y)
+WINDRES		:= armv7-w64-mingw32-windres
+STRIP		:= armv7-w64-mingw32-strip
+endif
+ifeq ($(CLANG), y)
+CPP             := clang++
+CC              := clang
+ifeq ($(ARM64), y)
+CPP		:= aarch64-w64-mingw32-clang++
+CC		:= aarch64-w64-mingw32-clang
+endif
+ifeq ($(ARM), y)
+CPP		:= armv7-w64-mingw32-clang++
+CC		:= armv7-w64-mingw32-clang
+endif
+else
+CPP             := ${TOOL_PREFIX}g++
+CC              := ${TOOL_PREFIX}gcc
+ifeq ($(ARM64), y)
+CPP		:= aarch64-w64-mingw32-g++
+CC		:= aarch64-w64-mingw32-gcc
+endif
+ifeq ($(ARM), y)
+CPP		:= armv7-w64-mingw32-g++
+CC		:= armv7-w64-mingw32-gcc
+endif
+endif
+DEPS		= -MMD -MF $*.d -c $<
+DEPFILE		:= .depends
+
+# Set up the correct toolchain flags.
+OPTS		:= $(EXTRAS) $(STUFF)
+OPTS		+= -Iinclude
+ifdef EXFLAGS
+OPTS		+= $(EXFLAGS)
+endif
+ifdef EXINC
+OPTS		+= -I$(EXINC)
+endif
+ifeq ($(OPTIM), y)
+ DFLAGS	:= -march=native
+else
+ ifeq ($(X64), y)
+  DFLAGS	:=
+ else
+  DFLAGS	:= -march=i686
+ endif
+endif
+ifeq ($(DEBUG), y)
+ DFLAGS		+= -ggdb -DDEBUG
+ AOPTIM		:=
+ ifndef COPTIM
+  COPTIM	:= -Og
+ endif
+else
+ DFLAGS		+= -g0
+ ifeq ($(OPTIM), y)
+  AOPTIM	:= -mtune=native
+  ifndef COPTIM
+   COPTIM	:= -O3 -ffp-contract=fast -flto
+  endif
+ else
+  ifndef COPTIM
+   COPTIM	:= -O3
+  endif
+ endif
+endif
+AFLAGS		:= -msse2 -mfpmath=sse
+ifeq ($(ARM), y)
+ DFLAGS		:= -march=armv7-a
+ AOPTIM		:=
+ AFLAGS		:= -mfloat-abi=hard
+endif
+ifeq ($(ARM64), y)
+ DFLAGS		:= -march=armv8-a
+ AOPTIM		:=
+ AFLAGS		:= -mfloat-abi=hard
+endif
+RFLAGS		:= --input-format=rc -O coff -Iinclude
+
+
+# Final versions of the toolchain flags.
+CFLAGS		:= $(WX_FLAGS) $(OPTS) $(DFLAGS) $(COPTIM) $(AOPTIM) \
+		   $(AFLAGS) -fomit-frame-pointer -mstackrealign -Wall \
+		   -fno-strict-aliasing
+
+CXXFLAGS	:= $(CFLAGS)
+
+
+#########################################################################
+#		Create the (final) list of objects to build.		#
+#########################################################################
+MAINOBJ		:= comp_test.o
+
+COMPOBJ		:= compress.o lzss.o lzmit.o
+
+OBJ		:= $(MAINOBJ) $(COMPOBJ)
+
+LIBS		:= -static
+
+ifneq ($(X64), y)
+ifneq ($(ARM64), y)
+LIBS		+= -Wl,--large-address-aware
+endif
+endif
+ifeq ($(ARM64), y)
+LIBS		+= -lgcc
+endif
+
+LIBS    += -static
+
+# Build module rules.
+ifeq ($(AUTODEP), y)
+%.o:		%.c
+		@echo $<
+		@$(CC) $(CFLAGS) $(DEPS) -c $<
+
+%.o:		%.cc
+		@echo $<
+		@$(CPP) $(CXXFLAGS) $(DEPS) -c $<
+
+%.o:		%.cpp
+		@echo $<
+		@$(CPP) $(CXXFLAGS) $(DEPS) -c $<
+else
+%.o:		%.c
+		@echo $<
+		@$(CC) $(CFLAGS) -c $<
+
+%.o:		%.cc
+		@echo $<
+		@$(CPP) $(CXXFLAGS) -c $<
+
+%.o:		%.cpp
+		@echo $<
+		@$(CPP) $(CXXFLAGS) -c $<
+
+%.d:		%.c $(wildcard $*.d)
+		@echo $<
+		@$(CC) $(CFLAGS) $(DEPS) -E $< >/dev/null
+
+%.d:		%.cc $(wildcard $*.d)
+		@echo $<
+		@$(CPP) $(CXXFLAGS) $(DEPS) -E $< >/dev/null
+
+%.d:		%.cpp $(wildcard $*.d)
+		@echo $<
+		@$(CPP) $(CXXFLAGS) $(DEPS) -E $< >/dev/null
+endif
+
+all:		$(PROG).exe
+
+
+$(PROG).exe:	$(OBJ)
+		@echo Linking $(PROG).exe ..
+		@$(CC) $(LDFLAGS) -o $(PROG).exe $(OBJ) $(LIBS)
+ifneq ($(DEBUG), y)
+		@$(STRIP) $(PROG).exe
+endif
+
+
+clean:
+		@echo Cleaning objects..
+		@-rm -f *.o 2>/dev/null
+		@-rm -f *.res 2>/dev/null
+
+clobber:	clean
+		@echo Cleaning executables..
+		@-rm -f *.d 2>/dev/null
+		@-rm -f *.exe 2>/dev/null
+#		@-rm -f $(DEPFILE) 2>/dev/null
+
+ifneq ($(AUTODEP), y)
+depclean:
+		@-rm -f $(DEPFILE) 2>/dev/null
+		@echo Creating dependencies..
+		@echo # Run "make depends" to re-create this file. >$(DEPFILE)
+
+depends:	DEPOBJ=$(OBJ:%.o=%.d)
+depends:	depclean $(OBJ:%.o=%.d)
+		@-cat $(DEPOBJ) >>$(DEPFILE)
+		@-rm -f $(DEPOBJ)
+
+$(DEPFILE):
+endif
+
+
+# Module dependencies.
+ifeq ($(AUTODEP), y)
+#-include $(OBJ:%.o=%.d)  (better, but sloooowwwww)
+-include *.d
+else
+include $(wildcard $(DEPFILE))
+endif
+
+
+# End of Makefile.mingw.
